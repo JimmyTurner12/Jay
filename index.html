@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="My AI">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#eef1f4">
+<title>My AI</title>
+<style>
+:root{--bg:#eef1f4;--panel:#fff;--ink:#1b2430;--mute:#66727f;--line:#d3dae1;--me:#1f4e5f;--meink:#fff;--err:#a3321f}
+@media(prefers-color-scheme:dark){:root{--bg:#12171d;--panel:#1a2129;--ink:#e6ebf0;--mute:#8a96a3;--line:#2b3540;--me:#3b8199;--err:#ff9b86}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;margin:0;font-weight:650;flex:1}
+header small{color:var(--mute);font-size:12px;max-width:42vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:10px;padding:8px 12px;min-height:40px}
+button.primary{background:var(--me);color:var(--meink);border-color:var(--me)}
+button:disabled{opacity:.5}
+button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--me);outline-offset:2px}
+#msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch}
+.m{max-width:88%;padding:10px 13px;border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);background:var(--panel)}
+.m.user{align-self:flex-end;background:var(--me);color:var(--meink);border-color:var(--me)}
+.m.wait::after{content:"Thinking…";color:var(--mute)}
+.m.err{color:var(--err)}
+.empty{margin:auto;text-align:center;color:var(--mute);max-width:26ch}
+form{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--panel);align-items:flex-end}
+textarea,input{font:inherit;width:100%;border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:var(--bg);color:var(--ink)}
+form textarea{resize:none;max-height:140px}
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);width:min(92vw,460px);padding:18px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog label{display:block;font-size:14px;color:var(--mute);margin:12px 0 4px}
+.row{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>My AI</h1>
+  <small id="mname"></small>
+  <button id="new" type="button">New chat</button>
+  <button id="cfg" type="button">Settings</button>
+</header>
+<main id="msgs" aria-live="polite"></main>
+<form id="f">
+  <textarea id="in" rows="1" placeholder="Message" aria-label="Message"></textarea>
+  <button id="go" class="primary" type="submit">Send</button>
+</form>
+
+<dialog id="dlg">
+  <strong>Settings</strong>
+  <label for="key">OpenRouter API key (stored only on this device)</label>
+  <input id="key" type="password" autocomplete="off" placeholder="sk-or-...">
+  <label for="model">Model</label>
+  <input id="model" list="models" autocomplete="off">
+  <datalist id="models"></datalist>
+  <label for="sys">System prompt (optional)</label>
+  <textarea id="sys" rows="3" placeholder="e.g. Answer briefly and directly."></textarea>
+  <div class="row">
+    <button id="save" class="primary" type="button">Save</button>
+    <button id="close" type="button">Close</button>
+    <button id="forget" type="button">Remove key</button>
+  </div>
+</dialog>
+
+<script>
+const URL_API='https://openrouter.ai/api/v1/chat/completions';
+const DEFAULT_MODEL='meta-llama/llama-3.3-70b-instruct:free';
+const $=s=>document.querySelector(s);
+const store={
+  get(k,d){try{const v=localStorage.getItem(k);return v===null?d:v}catch{return d}},
+  set(k,v){try{localStorage.setItem(k,v)}catch{}},
+  del(k){try{localStorage.removeItem(k)}catch{}}
+};
+const msgs=$('#msgs'),input=$('#in'),goBtn=$('#go'),dlg=$('#dlg');
+let history=[],busy=false;
+try{history=JSON.parse(store.get('chat','[]'))}catch{}
+
+function model(){return store.get('model',DEFAULT_MODEL)}
+function showModel(){$('#mname').textContent=model().split('/').pop()}
+function scroll(){msgs.scrollTop=msgs.scrollHeight}
+function add(role,text){
+  const d=document.createElement('div');
+  d.className='m '+role;d.textContent=text;
+  const e=msgs.querySelector('.empty');if(e)e.remove();
+  msgs.appendChild(d);scroll();return d;
+}
+function render(){
+  msgs.innerHTML='';
+  if(!history.length){
+    const e=document.createElement('div');e.className='empty';
+    e.textContent=store.get('key','')?'Ask anything.':'Open Settings and paste your OpenRouter key to start.';
+    msgs.appendChild(e);
+  }
+  history.forEach(m=>add(m.role,m.content));
+}
+function resize(){input.style.height='auto';input.style.height=Math.min(input.scrollHeight,140)+'px'}
+function save(){store.set('chat',JSON.stringify(history.slice(-60)))}
+
+async function errText(r){
+  let m='';
+  try{const j=await r.json();m=j.error&&j.error.message||''}catch{}
+  if(r.status===401)return 'Your key was rejected. Check it in Settings.';
+  if(r.status===429)return 'Rate limit reached. Wait a minute, or switch model in Settings.';
+  if(r.status===404||r.status===400)return (m||'Model unavailable.')+' Try another model in Settings.';
+  return m||('Request failed ('+r.status+').');
+}
+
+async function send(){
+  const text=input.value.trim();
+  if(!text||busy)return;
+  const key=store.get('key','');
+  if(!key){openCfg();return}
+  input.value='';resize();
+  history.push({role:'user',content:text});add('user',text);
+  const out=add('assistant','');out.classList.add('wait');
+  busy=true;goBtn.disabled=true;
+  try{
+    const sys=store.get('sys','');
+    const body={model:model(),stream:true,messages:(sys?[{role:'system',content:sys}]:[]).concat(history)};
+    const r=await fetch(URL_API,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error(await errText(r));
+    const rd=r.body.getReader(),dec=new TextDecoder();
+    let buf='',full='';
+    for(;;){
+      const {done,value}=await rd.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');buf=lines.pop();
+      for(const l of lines){
+        if(!l.startsWith('data: '))continue;
+        const d=l.slice(6).trim();
+        if(d==='[DONE]')continue;
+        let j;try{j=JSON.parse(d)}catch{continue}
+        if(j.error)throw new Error(j.error.message||'The model returned an error.');
+        const t=j.choices&&j.choices[0]&&j.choices[0].delta&&j.choices[0].delta.content;
+        if(t){full+=t;out.classList.remove('wait');out.textContent=full;scroll()}
+      }
+    }
+    if(!full)throw new Error('The model returned nothing. Try another model in Settings.');
+    history.push({role:'assistant',content:full});save();
+  }catch(e){
+    out.classList.remove('wait');out.classList.add('err');
+    out.textContent=e.message||'Something went wrong.';
+    history.pop();input.value=text;resize();
+  }
+  busy=false;goBtn.disabled=false;
+}
+
+function openCfg(){
+  $('#key').value=store.get('key','');
+  $('#model').value=model();
+  $('#sys').value=store.get('sys','');
+  dlg.showModal();
+}
+$('#f').addEventListener('submit',e=>{e.preventDefault();send()});
+input.addEventListener('input',resize);
+input.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();send()}});
+$('#cfg').onclick=openCfg;
+$('#close').onclick=()=>dlg.close();
+$('#save').onclick=()=>{
+  const k=$('#key').value.trim(),m=$('#model').value.trim();
+  if(k)store.set('key',k);
+  store.set('model',m||DEFAULT_MODEL);
+  store.set('sys',$('#sys').value);
+  showModel();dlg.close();if(!history.length)render();
+};
+$('#forget').onclick=()=>{store.del('key');$('#key').value='';if(!history.length)render()};
+$('#new').onclick=()=>{if(busy)return;history=[];save();render()};
+
+fetch('https://openrouter.ai/api/v1/models').then(r=>r.json()).then(j=>{
+  const dl=$('#models');
+  (j.data||[]).filter(m=>m.id.endsWith(':free')).forEach(m=>{
+    const o=document.createElement('option');o.value=m.id;dl.appendChild(o);
+  });
+}).catch(()=>{});
+
+showModel();render();
+</script>
+</body>
+</html>
