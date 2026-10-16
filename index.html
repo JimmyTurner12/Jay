@@ -52,8 +52,8 @@ dialog label{display:block;font-size:14px;color:var(--mute);margin:12px 0 4px}
 
 <dialog id="dlg">
   <strong>Settings</strong>
-  <label for="key">OpenRouter API key (stored only on this device)</label>
-  <input id="key" type="password" autocomplete="off" placeholder="sk-or-...">
+  <label for="key">Google AI Studio key (stored only on this device)</label>
+  <input id="key" type="password" autocomplete="off" placeholder="AIza...">
   <label for="model">Model</label>
   <input id="model" list="models" autocomplete="off">
   <datalist id="models"></datalist>
@@ -67,8 +67,8 @@ dialog label{display:block;font-size:14px;color:var(--mute);margin:12px 0 4px}
 </dialog>
 
 <script>
-const URL_API='https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_MODEL='meta-llama/llama-3.3-70b-instruct:free';
+const API='https://generativelanguage.googleapis.com/v1beta/';
+const DEFAULT_MODEL='gemini-flash-latest';
 const $=s=>document.querySelector(s);
 const store={
   get(k,d){try{const v=localStorage.getItem(k);return v===null?d:v}catch{return d}},
@@ -79,8 +79,8 @@ const msgs=$('#msgs'),input=$('#in'),goBtn=$('#go'),dlg=$('#dlg');
 let history=[],busy=false;
 try{history=JSON.parse(store.get('chat','[]'))}catch{}
 
-function model(){return store.get('model',DEFAULT_MODEL)}
-function showModel(){$('#mname').textContent=model().split('/').pop()}
+function model(){return store.get('model',DEFAULT_MODEL).replace(/^models\//,'')}
+function showModel(){$('#mname').textContent=model()}
 function scroll(){msgs.scrollTop=msgs.scrollHeight}
 function add(role,text){
   const d=document.createElement('div');
@@ -92,7 +92,7 @@ function render(){
   msgs.innerHTML='';
   if(!history.length){
     const e=document.createElement('div');e.className='empty';
-    e.textContent=store.get('key','')?'Ask anything.':'Open Settings and paste your OpenRouter key to start.';
+    e.textContent=store.get('key','')?'Ask anything.':'Open Settings and paste your Google AI key to start.';
     msgs.appendChild(e);
   }
   history.forEach(m=>add(m.role,m.content));
@@ -102,10 +102,10 @@ function save(){store.set('chat',JSON.stringify(history.slice(-60)))}
 
 async function errText(r){
   let m='';
-  try{const j=await r.json();m=j.error&&j.error.message||''}catch{}
-  if(r.status===401)return 'Your key was rejected. Check it in Settings.';
-  if(r.status===429)return 'Rate limit reached. Wait a minute, or switch model in Settings.';
-  if(r.status===404||r.status===400)return (m||'Model unavailable.')+' Try another model in Settings.';
+  try{const j=await r.json();m=(j.error&&j.error.message)||''}catch{}
+  if(r.status===429)return 'Free limit reached (per minute or per day). Wait a bit, or pick another model in Settings.';
+  if((r.status===400&&/api key/i.test(m))||r.status===401||r.status===403)return 'Your key was rejected. Check it in Settings.';
+  if(r.status===404)return 'That model is not available. Pick another in Settings.';
   return m||('Request failed ('+r.status+').');
 }
 
@@ -120,8 +120,13 @@ async function send(){
   busy=true;goBtn.disabled=true;
   try{
     const sys=store.get('sys','');
-    const body={model:model(),stream:true,messages:(sys?[{role:'system',content:sys}]:[]).concat(history)};
-    const r=await fetch(URL_API,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},body:JSON.stringify(body)});
+    const body={contents:history.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]}))};
+    if(sys)body.systemInstruction={parts:[{text:sys}]};
+    const r=await fetch(API+'models/'+encodeURIComponent(model())+':streamGenerateContent?alt=sse',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-goog-api-key':key},
+      body:JSON.stringify(body)
+    });
     if(!r.ok)throw new Error(await errText(r));
     const rd=r.body.getReader(),dec=new TextDecoder();
     let buf='',full='';
@@ -131,16 +136,19 @@ async function send(){
       buf+=dec.decode(value,{stream:true});
       const lines=buf.split('\n');buf=lines.pop();
       for(const l of lines){
-        if(!l.startsWith('data: '))continue;
-        const d=l.slice(6).trim();
-        if(d==='[DONE]')continue;
+        if(!l.startsWith('data:'))continue;
+        const d=l.slice(5).trim();
+        if(!d)continue;
         let j;try{j=JSON.parse(d)}catch{continue}
         if(j.error)throw new Error(j.error.message||'The model returned an error.');
-        const t=j.choices&&j.choices[0]&&j.choices[0].delta&&j.choices[0].delta.content;
+        if(j.promptFeedback&&j.promptFeedback.blockReason)throw new Error('Blocked by Google: '+j.promptFeedback.blockReason);
+        const c=j.candidates&&j.candidates[0];
+        const parts=(c&&c.content&&c.content.parts)||[];
+        const t=parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join('');
         if(t){full+=t;out.classList.remove('wait');out.textContent=full;scroll()}
       }
     }
-    if(!full)throw new Error('The model returned nothing. Try another model in Settings.');
+    if(!full)throw new Error('The model returned nothing. Try again or pick another model in Settings.');
     history.push({role:'assistant',content:full});save();
   }catch(e){
     out.classList.remove('wait');out.classList.add('err');
@@ -150,6 +158,16 @@ async function send(){
   busy=false;goBtn.disabled=false;
 }
 
+function loadModels(){
+  const key=store.get('key','');
+  if(!key)return;
+  fetch(API+'models?pageSize=100',{headers:{'x-goog-api-key':key}}).then(r=>r.json()).then(j=>{
+    const dl=$('#models');dl.innerHTML='';
+    (j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')&&/gemini/.test(m.name)).forEach(m=>{
+      const o=document.createElement('option');o.value=m.name.replace(/^models\//,'');dl.appendChild(o);
+    });
+  }).catch(()=>{});
+}
 function openCfg(){
   $('#key').value=store.get('key','');
   $('#model').value=model();
@@ -166,19 +184,12 @@ $('#save').onclick=()=>{
   if(k)store.set('key',k);
   store.set('model',m||DEFAULT_MODEL);
   store.set('sys',$('#sys').value);
-  showModel();dlg.close();if(!history.length)render();
+  showModel();dlg.close();if(!history.length)render();loadModels();
 };
 $('#forget').onclick=()=>{store.del('key');$('#key').value='';if(!history.length)render()};
 $('#new').onclick=()=>{if(busy)return;history=[];save();render()};
 
-fetch('https://openrouter.ai/api/v1/models').then(r=>r.json()).then(j=>{
-  const dl=$('#models');
-  (j.data||[]).filter(m=>m.id.endsWith(':free')).forEach(m=>{
-    const o=document.createElement('option');o.value=m.id;dl.appendChild(o);
-  });
-}).catch(()=>{});
-
-showModel();render();
+showModel();render();loadModels();
 </script>
 </body>
 </html>
